@@ -1,6 +1,6 @@
 // api/news.js
-// Fetches news from Anthropic and caches results in Vercel KV.
-// Cache refreshes at 7am and 11am Oslo time — everyone else gets instant results.
+// Fetches news from Anthropic and caches in Upstash Redis.
+// Cache refreshes at 7am and 11am Oslo time.
 
 export const config = { maxDuration: 60 };
 
@@ -27,7 +27,9 @@ function getCacheKey(query) {
   const date = oslo.toISOString().slice(0, 10);
   const hour = oslo.getHours();
   const slot = hour < 7 ? "prev" : hour < 11 ? "slot7" : "slot11";
-  return `news::${query}::${date}::${slot}`;
+  // Sanitise query for use as a key
+  const safeQuery = query.replace(/[^a-z0-9]/gi, "_").slice(0, 40);
+  return `news:${safeQuery}:${date}:${slot}`;
 }
 
 async function fetchFromAnthropic(query) {
@@ -77,17 +79,17 @@ export default async function handler(req, res) {
 
   const cacheKey = getCacheKey(query);
 
-  // Try to get cached version from Vercel KV
+  // Try Upstash Redis cache first
   try {
-    const { kv } = await import("@vercel/kv");
-    const cached = await kv.get(cacheKey);
+    const { Redis } = await import("@upstash/redis");
+    const redis = Redis.fromEnv();
+    const cached = await redis.get(cacheKey);
     if (cached) {
       console.log("Cache hit:", cacheKey);
       return res.status(200).json(cached);
     }
   } catch (kvErr) {
-    // KV not available — fall through to fresh fetch
-    console.warn("KV unavailable, fetching fresh:", kvErr.message);
+    console.warn("Cache unavailable, fetching fresh:", kvErr.message);
   }
 
   // No cache — fetch fresh from Anthropic
@@ -95,11 +97,14 @@ export default async function handler(req, res) {
     console.log("Fetching fresh news for:", cacheKey);
     const articles = await fetchFromAnthropic(query);
 
-    // Save to KV cache with 12 hour expiry
+    // Save to cache with 12 hour expiry
     try {
-      const { kv } = await import("@vercel/kv");
-      await kv.set(cacheKey, articles, { ex: 60 * 60 * 12 });
-    } catch (_) {}
+      const { Redis } = await import("@upstash/redis");
+      const redis = Redis.fromEnv();
+      await redis.set(cacheKey, JSON.stringify(articles), { ex: 60 * 60 * 12 });
+    } catch (e) {
+      console.warn("Could not save to cache:", e.message);
+    }
 
     return res.status(200).json(articles);
   } catch (err) {

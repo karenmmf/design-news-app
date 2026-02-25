@@ -1,5 +1,8 @@
 // api/news.js
-// Runs on Vercel. Keeps API key server-side.
+// Fetches news from Anthropic and caches results in Vercel KV.
+// Cache refreshes at 7am and 11am Oslo time — everyone else gets instant results.
+
+export const config = { maxDuration: 60 };
 
 const SYSTEM_PROMPT = `You are a curator of the creative and design world. Find and summarize the latest news in creativity and design.
 
@@ -18,16 +21,51 @@ Return a JSON array of exactly 5 items:
 ]
 Respond ONLY with the JSON array.`;
 
-function safeJsonParse(str) {
-  try {
-    return { ok: true, value: JSON.parse(str) };
-  } catch (e) {
-    return { ok: false, error: e };
+// Returns a cache key that changes at 7am and 11am Oslo time
+function getCacheKey(query) {
+  const oslo = new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/Oslo" }));
+  const date = oslo.toISOString().slice(0, 10);
+  const hour = oslo.getHours();
+  const slot = hour < 7 ? "prev" : hour < 11 ? "slot7" : "slot11";
+  return `news::${query}::${date}::${slot}`;
+}
+
+async function fetchFromAnthropic(query) {
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1500,
+      system: SYSTEM_PROMPT,
+      tools: [{ type: "web_search_20250305", name: "web_search" }],
+      messages: [{ role: "user", content: `Find 5 recent news items about: ${query}` }],
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    console.error("Anthropic error:", response.status, err);
+    throw new Error(`Anthropic returned ${response.status}`);
   }
+
+  const data = await response.json();
+  const text = data.content
+    .filter(b => b && b.type === "text")
+    .map(b => b.text)
+    .join("");
+
+  const clean = text.replace(/```json|```/g, "").trim();
+  const articles = JSON.parse(clean);
+  if (!Array.isArray(articles)) throw new Error("Response was not an array");
+  return articles;
 }
 
 export default async function handler(req, res) {
-  // Only allow POST
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
@@ -37,76 +75,35 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Missing query" });
   }
 
+  const cacheKey = getCacheKey(query);
+
+  // Try to get cached version from Vercel KV
   try {
-    const resp = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 1500,
-        system: SYSTEM_PROMPT,
-        tools: [{ type: "web_search_20250305", name: "web_search" }],
-        messages: [{ role: "user", content: `Find 5 recent news items about: ${query}` }],
-      }),
-    });
-
-    const rawText = await resp.text();
-
-    // If Anthropic returns non-200, log and return readable error
-    if (!resp.ok) {
-      console.error("Anthropic error status:", resp.status);
-      console.error("Anthropic error body:", rawText);
-      return res.status(500).json({
-        error: "Anthropic API error",
-        status: resp.status,
-      });
+    const { kv } = await import("@vercel/kv");
+    const cached = await kv.get(cacheKey);
+    if (cached) {
+      console.log("Cache hit:", cacheKey);
+      return res.status(200).json(cached);
     }
+  } catch (kvErr) {
+    // KV not available — fall through to fresh fetch
+    console.warn("KV unavailable, fetching fresh:", kvErr.message);
+  }
 
-    const parsed = safeJsonParse(rawText);
-    if (!parsed.ok) {
-      console.error("Failed to parse Anthropic JSON:", parsed.error);
-      console.error("Raw body:", rawText);
-      return res.status(500).json({ error: "Bad response from Anthropic" });
-    }
+  // No cache — fetch fresh from Anthropic
+  try {
+    console.log("Fetching fresh news for:", cacheKey);
+    const articles = await fetchFromAnthropic(query);
 
-    const data = parsed.value;
-
-    // Guard: content may be missing in some error shapes
-    if (!data?.content || !Array.isArray(data.content)) {
-      console.error("Unexpected Anthropic response shape:", data);
-      return res.status(500).json({ error: "Unexpected response from Anthropic" });
-    }
-
-    // Extract only text blocks
-    const text = data.content
-      .filter((b) => b && b.type === "text" && typeof b.text === "string")
-      .map((b) => b.text)
-      .join("");
-
-    const clean = text.replace(/```json|```/g, "").trim();
-
-    const articlesParsed = safeJsonParse(clean);
-    if (!articlesParsed.ok) {
-      console.error("Model did not return valid JSON array.");
-      console.error("Cleaned text was:", clean);
-      return res.status(500).json({ error: "Model output was not valid JSON" });
-    }
-
-    const articles = articlesParsed.value;
-
-    // Optional sanity check
-    if (!Array.isArray(articles)) {
-      console.error("Model output JSON is not an array:", articles);
-      return res.status(500).json({ error: "Model output was not an array" });
-    }
+    // Save to KV cache with 12 hour expiry
+    try {
+      const { kv } = await import("@vercel/kv");
+      await kv.set(cacheKey, articles, { ex: 60 * 60 * 12 });
+    } catch (_) {}
 
     return res.status(200).json(articles);
   } catch (err) {
-    console.error("API error:", err);
-    return res.status(500).json({ error: "Failed to fetch news" });
+    console.error("Fetch error:", err.message);
+    return res.status(500).json({ error: "Couldn't load news — please try again in a moment." });
   }
 }

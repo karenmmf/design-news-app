@@ -188,8 +188,8 @@ export default function App() {
         <div style={{ maxWidth: "680px", margin: "0 auto" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "1.1rem" }}>
             <div>
-              <p style={{ fontFamily: sans, fontSize: "0.68rem", fontWeight: 500, color: C.textFaint, margin: "0 0 0.15rem", letterSpacing: "0.08em", textTransform: "uppercase" }}>Daily Dispatch</p>
-              <h1 style={{ fontFamily: sans, fontSize: "clamp(1.3rem, 3vw, 1.8rem)", fontWeight: 600, margin: 0, letterSpacing: "-0.03em" }}>Creativity & Design</h1>
+              <p style={{ fontFamily: sans, fontSize: "0.68rem", fontWeight: 500, color: C.textFaint, margin: "0 0 0.15rem", letterSpacing: "0.08em", textTransform: "uppercase" }}>Curated creativity, delivered daily</p>
+              <h1 style={{ fontFamily: sans, fontSize: "clamp(1.3rem, 3vw, 1.8rem)", fontWeight: 600, margin: 0, letterSpacing: "-0.03em" }}>A Moment to Process</h1>
             </div>
             {activeView === "feed" && (
               <button onClick={() => fetchNews(activeTopic)} disabled={loading}

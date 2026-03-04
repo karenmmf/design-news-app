@@ -1,4 +1,4 @@
-// api/slack.js
+// api/slack.js v2
 // Sends a design news digest to Slack.
 // Called by Vercel Cron (weekly digest) or slash command (/designnews).
 export const config = { maxDuration: 60 };
